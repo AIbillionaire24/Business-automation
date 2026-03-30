@@ -74,5 +74,5 @@
 
 ## 연락처
 
-- 📧 beomsol1124@gmail.com
+- 📧 beomsol2@gmail.com
 - 💼 [GitHub](https://github.com/lifeispain1124)
