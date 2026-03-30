@@ -1,0 +1,1698 @@
+{
+  "name": "Shock Engine",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 10
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -768,
+        512
+      ],
+      "id": "277de8b4-5f3e-47b7-9105-917b5f081f22",
+      "name": "10min Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// Parse RSS v14\n// v13: detectRealtimeSource() toLowerCase() 추가, 빈 XML early continue\n// v14: FinancialJuice 패스스루 로직 추가\n//      detectSource()에 financialjuice.com 추가\n//      패스스루 항목 normalizeLink() 적용 (Codex)\n//      PASSTHROUGH_SOURCES Set 방식 (Codex + ChatGPT 권장)\n// ============================================================\nconst items = $input.all();\nconst results = [];\nconst seenLinks = new Set();\n\n// v14: 패스스루 소스 명시 (우발적 패스스루 방지)\n// 추후 소스 추가 시 여기만 수정\nconst PASSTHROUGH_SOURCES = new Set(['FinancialJuice']);\n\nconst NOISE_KEYWORDS = [\n  'price prediction', 'best crypto', 'buy now', 'top coins',\n  'advertorial', 'sponsored', 'beginners guide', 'is it worth', 'pros and cons',\n  'how to', 'how much', 'should you', 'retire',\n  'long term', 'technical analysis', 'trading strategy', 'market outlook',\n  'year forecast', 'price target for', 'what is ', 'explained', ' vs ',\n  'live updates', 'live blog', 'roundup', 'opinion', 'commentary'\n];\n\nfunction detectSource(link) {\n  const l = link.toLowerCase();\n  if (l.includes('benzinga.com'))       return 'Benzinga';\n  if (l.includes('cnbc.com'))           return 'CNBC';\n  if (l.includes('marketwatch.com'))    return 'MarketWatch';\n  if (l.includes('nytimes.com'))        return 'NYT';\n  if (l.includes('yahoo.com'))          return 'Yahoo Finance';\n  if (l.includes('bloomberg.com'))      return 'Bloomberg';\n  if (l.includes('seekingalpha.com'))   return 'Seeking Alpha';\n  if (l.includes('financialjuice.com')) return 'FinancialJuice'; // v14 추가\n  return 'Unknown';\n}\n\nfunction detectRealtimeSource(xml) {\n  const x = (xml || '').toLowerCase();\n  if (x.includes('dowjones.io') || x.includes('mw_realtimeheadlines')) return 'MarketWatch Realtime';\n  return null;\n}\n\nfunction extractText(block, keys) {\n  for (const key of keys) {\n    const regex = new RegExp(`<${key}[^>]*>\\\\s*<!\\\\[CDATA\\\\[([\\\\s\\\\S]*?)\\\\]\\\\]>\\\\s*<\\\\/${key}>`, 'i');\n    const cdataMatch = block.match(regex);\n    if (cdataMatch) return cdataMatch[1].trim();\n    const regex2 = new RegExp(`<${key}[^>]*>([\\\\s\\\\S]*?)<\\\\/${key}>`, 'i');\n    const match = block.match(regex2);\n    if (match) return match[1].trim();\n  }\n  return '';\n}\n\nfunction normalizeLink(url) {\n  return url.trim().replace(/#.*$/, '').split('?')[0].replace(/\\/+$/, '');\n}\n\nfunction extractLink(block) {\n  const alt = block.match(/<link\\b(?=[^>]*\\brel=[\"']alternate[\"'])(?=[^>]*\\bhref=[\"']([^\"']+)[\"'])[^>]*>/i);\n  if (alt) return normalizeLink(alt[1]);\n\n  const href = block.match(/<link[^>]+href=[\"']([^\"']+)[\"']/i);\n  if (href) return normalizeLink(href[1]);\n\n  const text = block.match(/<link>([^<]+)<\\/link>/i);\n  if (text) return normalizeLink(text[1]);\n\n  const guid = block.match(/<guid[^>]*>([^<]+)<\\/guid>/i);\n  if (guid && guid[1].startsWith('http')) return normalizeLink(guid[1]);\n\n  return '';\n}\n\nfunction decode(str) {\n  return str\n    .replace(/&amp;/g, '&')\n    .replace(/&lt;/g, '<')\n    .replace(/&gt;/g, '>')\n    .replace(/&quot;/g, '\"')\n    .replace(/&#039;/g, \"'\")\n    .replace(/&#x2019;/g, \"'\")\n    .replace(/&#x2018;/g, \"'\")\n    .replace(/&#x201C;/g, '\"')\n    .replace(/&#x201D;/g, '\"')\n    .replace(/&#8230;/g, '...')\n    .replace(/&#8216;/g, \"'\")\n    .replace(/&#8217;/g, \"'\")\n    .replace(/<[^>]+>/g, '')\n    .trim();\n}\n\nconst nowMs = Date.now();\n\nfor (const item of items) {\n\n  // ✅ v14: 이미 정규화된 항목 패스스루 (FinancialJuice Code 노드 출력)\n  if (PASSTHROUGH_SOURCES.has(item.json.source) && item.json.title && item.json.link) {\n    const link = normalizeLink(item.json.link || '');\n    if (link && !seenLinks.has(link)) {\n      seenLinks.add(link);\n      results.push({ json: { ...item.json, link } });\n    }\n    continue;\n  }\n\n  // 기존 XML 소스 (8개) 처리\n  const xml = (item.json.data || item.json.body || '').trim();\n  if (!xml) continue;\n\n  const realtimeSource = detectRealtimeSource(xml);\n\n  const blocks = [\n    ...(xml.match(/<item[\\s\\S]*?<\\/item>/gi) || []),\n    ...(xml.match(/<entry[\\s\\S]*?<\\/entry>/gi) || [])\n  ];\n\n  for (const block of blocks) {\n    const title   = decode(extractText(block, ['title']));\n    const link    = extractLink(block);\n    const desc    = decode(extractText(block, ['content:encoded', 'description', 'summary'])).substring(0, 1000);\n    const pubDate = extractText(block, ['pubDate', 'updated', 'published']).trim();\n\n    if (!title || !link) continue;\n    if (seenLinks.has(link)) continue;\n\n    const text = (title + ' ' + desc).toLowerCase();\n    if (NOISE_KEYWORDS.some(k => text.includes(k))) continue;\n\n    if (!pubDate) continue;\n    const pub = new Date(pubDate);\n    if (isNaN(pub.getTime())) continue;\n\n    const age_minutes_raw = (nowMs - pub.getTime()) / 60000;\n    if (age_minutes_raw > 1440) continue;\n    if (age_minutes_raw < -60)  continue;\n\n    seenLinks.add(link);\n\n    let domain = '';\n    try { domain = new URL(link).hostname; } catch {}\n\n    const source      = realtimeSource || detectSource(link);\n    const age_minutes = Math.round(age_minutes_raw);\n\n    results.push({\n      json: {\n        source,\n        title,\n        link,\n        domain,\n        contentSnippet: desc,\n        pubDate,\n        age_minutes,\n      }\n    });\n  }\n}\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -96,
+        352
+      ],
+      "id": "afec8487-a166-42f5-94a5-8f04cbb9ea1e",
+      "name": "Parse RSS"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// Keyword Filter (Company AND Event) — v23  BEST\n// n8n Code 노드에 그대로 붙여넣기 가능\n//\n// 통과 경로 요약 (우선순위 순):\n//   1. 지정학/거시 충격  → isGeopolitical\n//   2. 매크로 이벤트    → (hasMacroKeyword || hasMacroAction)\n//                          AND (isMacroSource || hasMacroEntity)\n//                          AND !isMacroNoise\n//   3. 기업 이벤트      → hasCompany AND (hasEvent || chipShock)\n//      ※ 2·3 경로 이전에 Reaction 기사 차단\n//\n// 수정 이력:\n//   v10–v19: 기업 이벤트 필터 정교화 (Reaction 차단, 티커 보강 등)\n//   v20: FinancialJuice 매크로 소스 통합\n//         · MACRO_KEYWORDS, MACRO_ENTITIES_RE 신설\n//         · source_type === 'macro' 전용 로직\n//   v21: 버그 3개 수정 + Codex 제안 반영\n//         · minLen: 40 → isMacroSource ? 10 : 40\n//         · MACRO 통과 조건: (isMacroSource || hasMacroEntity) 추가\n//         · MACRO_NOISE_PATTERNS 신설 (소비자금융 해설 차단)\n//   v22: Codex 보정 3개\n//         · minLen: (isMacroSource || hasMacroEntity) ? 10 : 40\n//         · u\\.s\\. treasury → u\\.?s\\.? (US Treasury 점 없는 형태 커버)\n//         · MACRO_ACTION_RE 신설 (entity + 동사 조합 보조 경로)\n//   v23: Codex 오탐 방지 보정 4개\n//         · MACRO_ACTION_RE 동사 축소 (says/announces/expects 제거)\n//         · MACRO_CONTEXT_RE 신설 → entity + 동사 + 경제 문맥 3중 게이트\n//         · MACRO_ENTITIES_RE에서 white house / pentagon 제거\n//         · MACRO_KEYWORDS에 'signals cut' 패턴 추가\n// ============================================================\n\nconst items     = $input.all();\nconst seenLinks = new Set();\nconst results   = [];\n\n// ── 유틸\nconst escapeRe = s => s.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&');\n\n// ════════════════════════════════════════════════════════════\n//  섹션 1: 기업 식별 (Company / Ticker)\n// ════════════════════════════════════════════════════════════\n\nconst COMPANY_NAMES = [\n  'nvidia', 'amd', 'intel', 'tsmc', 'qualcomm', 'broadcom',\n  'arm holdings', 'arm ltd',\n  'samsung', 'sk hynix', 'micron', 'asml', 'smci', 'marvell',\n  'apple', 'microsoft', 'google', 'alphabet', 'meta', 'amazon', 'tesla',\n  'lockheed', 'raytheon', 'northrop', 'boeing', 'palantir',\n  'exxon', 'chevron', 'goldman sachs', 'morgan stanley', 'jpmorgan',\n];\nconst COMPANY_NAME_RES = COMPANY_NAMES.map(\n  n => new RegExp('(^|[^a-z0-9-])' + escapeRe(n) + '(?=$|[^a-z0-9-])', 'i')\n);\n\n// 긴 티커 — 오탐 위험 낮음\nconst TICKERS = [\n  'nvda','intc','tsm','qcom','avgo',\n  'asml','smci','klac','lrcx','amat',\n  'aapl','msft','googl','amzn','tsla',\n  'lmt','rtx','noc','pltr','xom','cvx','jpm',\n];\nconst TICKER_RE = new RegExp(\n  '(^|[^a-z0-9.-])(?:' + TICKERS.map(escapeRe).join('|') + ')(?=$|[^a-z0-9.-])', 'i'\n);\n\n// 짧은 티커 — title + 재무 맥락 AND 조건 필수 (MS Office, ARM Yourself 오탐 방지)\nconst SHORT_TICKER_TITLE_RE   = /(^|[\\s(\\[])(MU|BA|MS|GS|ARM|META)(?=[:)\\]\\s]|$)/;\nconst SHORT_TICKER_CONTEXT_RE = /\\b(earnings?|guidance|results?|eps|revenue|beat(?:s|en)?|miss(?:es|ed)?|upgrades?|downgrades?|initiates?|coverage|target|cut|raises?|wins?|contract|deal|files?|sec|8-k)\\b/i;\n\nfunction hasCompanyMatch(text, rawTitle) {\n  const shortHit =\n    SHORT_TICKER_TITLE_RE.test(rawTitle) &&\n    SHORT_TICKER_CONTEXT_RE.test(rawTitle.toLowerCase());\n  return COMPANY_NAME_RES.some(re => re.test(text)) ||\n         TICKER_RE.test(text) ||\n         shortHit;\n}\n\n// ════════════════════════════════════════════════════════════\n//  섹션 2: 매크로 이벤트 감지\n// ════════════════════════════════════════════════════════════\n\n// 중앙은행 / 국제기구 엔티티 (white house·pentagon 제거 — 정치 오탐 방지)\nconst MACRO_ENTITIES_RE = /\\b(fed|federal reserve|ecb|european central bank|boj|bank of japan|boe|bank of england|pboc|rba|rbnz|fomc|powell|lagarde|ueda|yellen|opec|imf|world bank|u\\.?s\\.? treasury)\\b/i;\n\n// 보조 액션 동사 (좁게 유지 — says/announces/expects 제거로 정치 기사 오탐 방지)\nconst MACRO_ACTION_RE   = /\\b(raises?|cuts?|holds?|hikes?|signals?|warns?)\\b/i;\n\n// 경제 문맥 게이트 (entity + 동사만으로 통과 방지)\n// \"Lagarde warns of political uncertainty\" → warns 있어도 경제 문맥 없으면 차단\nconst MACRO_CONTEXT_RE  = /\\b(rate|rates|bps|inflation|cpi|pce|payroll|nfp|unemployment|gdp|pmi|yield|treasury|oil|crude|opec|tariff|sanction)\\b/i;\n\n// 소비자금융 해설 기사 차단\n// \"Fed raises rates — here's why your mortgage costs more\" → isMacroNoise = true\nconst MACRO_NOISE_PATTERNS = [\n  'mortgage', 'savings account', 'what to do', 'how to',\n  'personal finance', 'your portfolio', 'your savings', 'your mortgage',\n  'what it means for you', \"here's why\", 'here is why', 'this is why',\n  'explainer', 'everything you need', 'what investors should',\n];\n\n// 매크로 이벤트 키워드 (hasCompany 불필요)\nconst MACRO_KEYWORDS = [\n  // 금리 액션\n  'raises rates', 'rate hike',   'rate cut',        'rate cuts',\n  'signals cut',  'signals rate cut', 'rate cut signal',\n  'holds rates',  'rate hold',   'rates unchanged',\n  'interest rate decision',      'rate decision',\n  'hikes rates',  'cuts rates',  'basis points',    'bps',\n  // 중앙은행 발화 (콜론 포함 — FinancialJuice 헤드라인 패턴)\n  'powell:', 'lagarde:', 'ueda:', 'yellen:',\n  'fed chair', 'ecb president', 'boj governor',\n  // 경제지표\n  'cpi ',    'core cpi',     'pce ',          'core pce',\n  'nonfarm payroll',         'nfp ',          'jobs report',\n  'unemployment rate',       'jobless claims',\n  'gdp growth', 'gdp contracts', 'gdp shrinks',\n  'retail sales', 'pmi ',   'inflation data', 'inflation report',\n  // OPEC / 에너지\n  'opec cuts',  'opec raises', 'opec holds',\n  'opec+ cuts', 'opec+ raises',\n  'output cut', 'production cut', 'supply cut',\n  // 관세 / 무역\n  'imposes tariffs', 'new tariffs', 'tariff hike',\n  'trade war escalates', 'trade deal',\n  // 시장 지수 충격\n  'dow falls',    'dow rises',    'dow tumbles',\n  's&p falls',    's&p rises',    's&p tumbles',\n  'nasdaq falls', 'nasdaq rises', 'nasdaq tumbles',\n  // 채권 / 달러\n  'yield spikes', 'yield surges', 'yield rises',\n  '10-year yield', '2-year yield', 'treasury yield',\n  'dollar surges', 'dollar plunges', 'dollar index',\n  // 지정학 속보 (GEOPOLITICAL 안전망)\n  'nuclear', 'ceasefire', 'peace deal', 'invades', 'invasion',\n];\n\n// ════════════════════════════════════════════════════════════\n//  섹션 3: 기업 이벤트 키워드\n// ════════════════════════════════════════════════════════════\n\nconst EVENT_KEYWORDS = [\n  // 실적 / 가이던스\n  'earnings',         'guidance',         'forecast',\n  '8-k',              'sec filing',       'files 8-k',\n  'beat estimates',   'miss estimates',   'beats',    'misses',  ' beat',\n  'revenue beat',     'revenue miss',\n  'quarterly revenue','annual revenue',\n  'quarterly profit', 'quarterly loss',   'net loss', 'net profit',\n  'reports q',        'quarterly results',\n  'announces results','announces earnings',\n  // M&A / 규제\n  'merger', 'acquisition', 'm&a',\n  'export restriction', 'lawsuit', 'regulation',\n  // 애널리스트 액션\n  'analyst upgrade', 'analyst downgrade',\n  'upgrades', 'downgrades',\n  'initiates coverage', 'initiates at', 'coverage initiation',\n  'target raised', 'target cut',\n  'raises guidance', 'raises forecast', 'raises outlook',\n  'cuts guidance',   'cuts forecast',   'cuts outlook',\n  // 시장 충격\n  'selloff', 'sell-off',\n  // 기술 / 산업\n  'chip shortage', 'chip export',\n  'data center revenue', 'data center deal',\n  'semiconductor export',\n  'ai chip', 'ai investment',\n  // CEO / CFO\n  'ceo resigns', 'ceo fired', 'ceo steps down',\n  'cfo resigns', 'cfo fired', 'cfo steps down',\n  'appoints ceo', 'appoints cfo', 'new ceo', 'new cfo',\n  // 방산 / 정부 계약 (복합만 — 단독 contract/award 오탐 방지)\n  'wins contract',      'win contract',\n  'awarded contract',   'defense contract',   'government contract',\n  'pentagon contract',  'military contract',\n  'defense deal',       'government deal',    'awarded $',\n];\n\n// NYT — 지정학/거시 위주라 재무 이벤트 키워드 축소\nconst NYT_EVENT_KEYWORDS = [\n  'earnings', 'guidance', 'merger', 'acquisition', 'm&a',\n  'export restriction', 'sanctions', 'sec filing', '8-k',\n  'beat estimates', 'miss estimates', 'target raised', 'target cut',\n  'reports q', 'quarterly results', 'announces earnings',\n  'iran', 'airstrike', 'military strike', 'oil supply',\n];\n\n// ════════════════════════════════════════════════════════════\n//  섹션 4: 지정학 / 거시 충격\n// ════════════════════════════════════════════════════════════\n\nconst GEOPOLITICAL_KEYWORDS = [\n  'airstrike',       'air strike',\n  'military strike', 'missile strike',\n  'strait of hormuz','hormuz',\n  'war in iran',     'war in middle east', 'conflict in middle east',\n  'export ban',\n  'dow dives',   'dow plunges',   'dow drops',   'dow slides',\n  'market crash','market plunge', 'market selloff','selloff accelerates',\n  'stocks plunge','stocks tumble','stocks slide',\n  'oil spikes',  'oil surges',\n  'circuit breaker','black monday','flash crash',\n  'chip ban',         'chip export ban',        'semiconductor export ban',\n  'chip restriction', 'semiconductor restriction',\n];\n\n// ════════════════════════════════════════════════════════════\n//  섹션 5: 노이즈 차단\n// ════════════════════════════════════════════════════════════\n\n// Reaction 기사 (price 반응 해설 — 이벤트 기사 아님)\nconst REACTION_PATTERNS = [\n  // stock\n  'stock surges','stock surge','stock surged',\n  'stock jumps', 'stock jump', 'stock jumped',\n  'stock soars', 'stock soar', 'stock soared',\n  'stock climbs','stock climb','stock climbed',\n  'stock rallies','stock rally','stock rallied',\n  'stock falls', 'stock fall', 'stock fell',\n  'stock drops', 'stock drop', 'stock dropped',\n  'stock plunges','stock plunge','stock plunged',\n  'stock tumbles','stock tumble','stock tumbled',\n  'stock slides','stock slide','stock slid',\n  'stock dives', 'stock dive', 'stock dived',\n  'stock gains after','stock rises after','stock rose',\n  // shares\n  'shares surge','shares surges','shares surged',\n  'shares jump', 'shares jumps', 'shares jumped',\n  'shares soar', 'shares soars', 'shares soared',\n  'shares climb','shares climbs','shares climbed',\n  'shares rally','shares rallies','shares rallied',\n  'shares fall', 'shares falls', 'shares fell',\n  'shares drop', 'shares drops', 'shares dropped',\n  'shares plunge','shares plunges','shares plunged',\n  'shares tumble','shares tumbles','shares tumbled',\n  'shares slide','shares slides','shares slid',\n  'shares gain after','shares rise after','shares rose',\n  // stocks 복수\n  'stocks surge','stocks surged','stocks jump','stocks jumped',\n  'stocks soar', 'stocks soared','stocks fall', 'stocks fell',\n  'stocks drop', 'stocks dropped','stocks plunge','stocks plunged',\n  'stocks tumble','stocks tumbled','stocks slide','stocks slid',\n  'stocks rally','stocks rallied',\n  // after/following (결과 해설)\n  'after earnings','after results','after reporting',\n  'after beating', 'after missing','after the report',\n  'following earnings','following results',\n];\n// stock up/down — 'stock update', 'stock upside' 오탐 방지\nconst REACTION_REGEXES = [\n  /\\b(stock|shares|stocks)\\s+(up|down|higher|lower)\\b/i,\n];\n\n// 크립토 노이즈 — 회사명 없으면 차단\nconst CRYPTO_NOISE = [\n  'bitcoin price prediction','crypto price prediction',\n  'will bitcoin','btc price target','ethereum price target',\n];\n\n// outlook 맥락 기반 허용 (Microsoft Outlook 제품명 오탐 방지)\nconst OUTLOOK_RE     = /\\boutlook\\b/i;\nconst OUTLOOK_CTX_RE = /\\b(raises?|cuts?|guidance|forecast|revenue|eps|profit|q[1-4]|fy\\d{2,4}|full[- ]year)\\b/i;\n\n// ════════════════════════════════════════════════════════════\n//  메인 루프\n// ════════════════════════════════════════════════════════════\n\nfor (const item of items) {\n  if (item.json._empty)  continue;\n  if (!item.json.link)   continue;\n\n  const link = item.json.link.split('?')[0];\n  if (seenLinks.has(link)) continue;\n\n  // isMacroSource: 최상단에서 계산 (minLen 결정에 필요)\n  const isMacroSource = item.json.source_type === 'macro';\n\n  const rawTitle = (item.json.title || '').trim();\n  const title    = rawTitle.toLowerCase();\n  const text     = (title + ' ' + (item.json.contentSnippet || item.json.content || '')).toLowerCase();\n\n  // ── 최소 길이 게이트\n  // macro 소스 또는 매크로 엔티티 명시 시 10자 (예: \"ECB HOLDS RATES\" 15자 대응)\n  // 일반 소스는 40자 (단문 노이즈 차단)\n  const hasMacroEntity = MACRO_ENTITIES_RE.test(text);\n  const minLen = (isMacroSource || hasMacroEntity) ? 10 : 40;\n  if (text.length < minLen) continue;\n\n  // ── \"Why ...\" 제목 차단 (reaction explanation)\n  if (title.trimStart().startsWith('why ')) continue;\n\n  const hasCompany = hasCompanyMatch(text, rawTitle);\n\n  // ── 크립토 노이즈 차단\n  if (CRYPTO_NOISE.some(k => text.includes(k)) && !hasCompany) continue;\n\n  // ──────────────────────────────────────────────────────────\n  //  경로 1: 지정학 / 거시 충격\n  //  hasCompany 불필요, Reaction 필터 면제\n  // ──────────────────────────────────────────────────────────\n  const hasIran        = text.includes('iran');\n  const hasOil         = text.includes('oil') || text.includes('crude');\n  const hasMarketShock = ['selloff','tumble','plunge','attack','strike','sanction'].some(k => text.includes(k));\n  const hasTariff      = text.includes('tariff');\n\n  const isGeopolitical =\n    (hasIran && (hasOil || hasMarketShock))             ||\n    (hasTariff && (hasMarketShock || text.includes('stock') || text.includes('market'))) ||\n    text.includes('sanctions on')                       ||\n    text.includes('oil supply')                         ||\n    text.includes('crude oil')                          ||\n    GEOPOLITICAL_KEYWORDS.some(k => text.includes(k));\n\n  if (isGeopolitical) {\n    seenLinks.add(link);\n    results.push({ ...item, json: { ...item.json } });\n    continue;\n  }\n\n  // ──────────────────────────────────────────────────────────\n  //  경로 2: 매크로 이벤트\n  //  조건: (hasMacroKeyword || hasMacroAction)\n  //        AND (isMacroSource || hasMacroEntity)\n  //        AND !isMacroNoise\n  //\n  //  hasMacroAction = entity + 동사 + 경제 문맥 (3중 게이트)\n  //  예시:\n  //    FJ \"ECB HOLDS RATES\"        → isMacroSource + hasMacroKeyword → 통과\n  //    BZ \"Powell signals cut\"     → hasMacroEntity + signals cut KW → 통과\n  //    BZ \"Lagarde warns inflation\"→ hasMacroEntity + warns + inflation → 통과\n  //    BZ \"Lagarde warns politics\" → warns 있지만 CONTEXT 없음 → 차단\n  //    BZ \"White House says tariffs\" → white house 제거됨 → entity 없음 → 차단\n  // ──────────────────────────────────────────────────────────\n  const hasMacroKeyword = MACRO_KEYWORDS.some(k => text.includes(k));\n  const isMacroNoise    = MACRO_NOISE_PATTERNS.some(k => text.includes(k));\n  const hasMacroAction  = hasMacroEntity &&\n                          MACRO_ACTION_RE.test(text) &&\n                          MACRO_CONTEXT_RE.test(text);\n\n  if ((hasMacroKeyword || hasMacroAction) && (isMacroSource || hasMacroEntity) && !isMacroNoise) {\n    seenLinks.add(link);\n    results.push({ ...item, json: { ...item.json } });\n    continue;\n  }\n\n  // ──────────────────────────────────────────────────────────\n  //  Reaction 차단 (경로 1·2 이후 실행)\n  //  매크로 소스는 면제 (RAISES/CUTS 자체가 이벤트이므로)\n  // ──────────────────────────────────────────────────────────\n  if (!isMacroSource) {\n    const isReaction =\n      REACTION_PATTERNS.some(k => text.includes(k)) ||\n      REACTION_REGEXES.some(re => re.test(text));\n    if (isReaction) continue;\n  }\n\n  // ──────────────────────────────────────────────────────────\n  //  경로 3: 기업 이벤트\n  //  조건: hasCompany AND (hasEvent || chipShock)\n  // ──────────────────────────────────────────────────────────\n  const chipShock =\n    (text.includes('chip') || text.includes('semiconductor')) &&\n    (text.includes('shortage') || text.includes('sanction'));\n\n  const keywords        = item.json.source === 'NYT' ? NYT_EVENT_KEYWORDS : EVENT_KEYWORDS;\n  const hasEventBase    = keywords.some(k => text.includes(k));\n  const hasFinancialOutlook = OUTLOOK_RE.test(text) && OUTLOOK_CTX_RE.test(text);\n  const hasEvent        = hasEventBase || hasFinancialOutlook;\n\n  if (!(hasCompany && (hasEvent || chipShock))) continue;\n\n  seenLinks.add(link);\n  results.push({ ...item, json: { ...item.json } });\n}\n\nconsole.log(`[FILTER v23] 입력: ${items.length} / 통과: ${results.length}`);\nif (results.length === 0) return [{ json: { _empty: true } }];\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        128,
+        352
+      ],
+      "id": "4e44102e-d6f1-47fd-9ede-831ce8da381a",
+      "name": "Keyword Filter (Company AND Event)"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "empty-check",
+              "leftValue": "={{ !$json._empty }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        352,
+        352
+      ],
+      "id": "82ea7547-ac1d-4238-a75b-0ff769e335fd",
+      "name": "Has Results?"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        528,
+        160
+      ],
+      "id": "bbdf9c7a-4237-4b4c-ad92-089c5df72127",
+      "name": "Split Per Article"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ✅ Mode: Run Once for All Items\n\nconst lookupResults = $input.all();\n\n// ✅ 핵심 수정: .first() → .item.json\n// .first()는 루프 중 항상 첫 번째 기사만 참조 → 중복 체크 오작동\n// .item.json = 현재 루프 기사 참조 (정확)\nconst currentArticle = $('Split Per Article').item.json;\n\nconst normalize = (url) => {\n  if (!url) return '';\n  return url\n    .replace(/^https?:\\/\\//, '')\n    .split('?')[0]\n    .replace(/\\/$/, '')\n    .toLowerCase();\n};\n\nconst normalizedCurrent = normalize(currentArticle.link);\n\nconst isDuplicate = lookupResults.some(item => {\n  const link = item?.json?.link || item?.json?.Link || '';\n  return link !== '' && normalize(link) === normalizedCurrent;\n});\n\nconsole.log(\n  `[DEDUP] link=${currentArticle.link} / normalized=${normalizedCurrent} / duplicate=${isDuplicate} / dbRows=${lookupResults.length}`\n);\n\nreturn [{\n  json: {\n    ...currentArticle,\n    _duplicate: Boolean(isDuplicate)\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1024,
+        80
+      ],
+      "id": "06b61bb3-2433-4965-b668-af1199854268",
+      "name": "Duplicate Check Logic"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "dup-check",
+              "leftValue": "={{ $json._duplicate }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1248,
+        80
+      ],
+      "id": "7094fcfd-220a-4a25-950f-347a23f00a71",
+      "name": "New Article?"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "gpt-4o-mini",
+          "mode": "list",
+          "cachedResultName": "GPT-4O-MINI"
+        },
+        "messages": {
+          "values": [
+            {
+              "content": "You are an AI system that detects short-term stock market shocks from breaking financial news.\nYour purpose is to identify events that can move stock prices within the same trading day.\nYou specialize in: AI, semiconductors, big tech, defense, energy, and macro market shocks.\n\nIgnore:\n- generic AI industry trends without specific company impact\n- product showcases without financial announcements\n- opinion pieces and long-term forecasts\n- conference presentations without concrete financial data\n- cryptocurrency or blockchain content unrelated to listed stocks\n- price prediction articles (\"will X reach $Y by 2030\")\n\nPrioritize:\n- earnings results (EPS beat/miss with numbers)\n- guidance raised or cut (with specifics)\n- SEC filings (8-K)\n- M&A announcements (confirmed or credible)\n- analyst rating or price target changes\n- export bans, sanctions, or regulatory actions\n- CEO/CFO resignations or appointments\n- data center revenue announcements\n- supply chain disruptions\n- geopolitical events affecting oil, energy, or defense supply chains\n- market-wide selloffs or crashes (Dow/S&P major drop, oil price spike, Iran/Hormuz)\n\n────────────────────────────────────────\nOUTPUT SCHEMA\n────────────────────────────────────────\nRespond ONLY in valid JSON. No markdown. No explanation. No code blocks.\n\n{\n  \"event_type\": \"Earnings | Guidance | Regulation | M&A | Product | Analyst | Macro | SupplyChain | Other\",\n  \"ticker\": \"see ticker rules below\",\n  \"shock_score\": 1-5,\n  \"direction\": \"Bullish | Bearish | Neutral\",\n  \"confidence\": 1-5,\n  \"thesis\": \"한국어 한 문장: 무슨 일이 발생했고 왜 오늘 주가에 영향을 주는지\"\n}\n\n────────────────────────────────────────\nLANGUAGE RULES\n────────────────────────────────────────\n- JSON keys must remain in English.\n- event_type, ticker, direction must remain in English.\n- thesis MUST be written in Korean.\n- Never write thesis in English. Never mix English into thesis.\n- Always translate the meaning of the article into Korean for thesis.\n\n────────────────────────────────────────\nTICKER RULES\n────────────────────────────────────────\nCovered tickers:\n  NVDA, AMD, INTC, TSM, QCOM, AVGO, ARM, MU, ASML, SMCI\n  AAPL, MSFT, GOOGL, META, AMZN, TSLA\n  LMT, RTX, NOC, BA, PLTR\n  XOM, CVX\n  GS, MS, JPM\n  Samsung → 005930.KS\n\nCompany name to ticker mapping:\n  NVIDIA / Nvidia          → NVDA\n  AMD / Advanced Micro     → AMD\n  Intel                    → INTC\n  TSMC / Taiwan Semi       → TSM\n  Qualcomm                 → QCOM\n  Broadcom                 → AVGO\n  ARM / Arm Holdings       → ARM\n  Micron                   → MU\n  ASML                     → ASML\n  Super Micro / Supermicro → SMCI\n  Apple                    → AAPL\n  Microsoft                → MSFT\n  Google / Alphabet        → GOOGL\n  Meta / Facebook          → META\n  Amazon / AWS             → AMZN\n  Tesla                    → TSLA\n  Lockheed Martin          → LMT\n  Raytheon / RTX           → RTX\n  Northrop Grumman         → NOC\n  Boeing                   → BA\n  Palantir                 → PLTR\n  ExxonMobil / Exxon       → XOM\n  Chevron                  → CVX\n  Goldman Sachs            → GS\n  Morgan Stanley           → MS\n  JPMorgan / JP Morgan     → JPM\n  Samsung                  → 005930.KS\n\nTicker selection rules:\n- Always identify the primary affected ticker even if shock_score is low.\n- Ticker extraction is independent from shock scoring.\n- If a company name clearly matches the mapping list, NEVER return UNKNOWN.\n- If multiple companies are equally affected → MULTI\n- If event affects broad US equities (market-wide macro shock) → MULTI\n- UNKNOWN only if article has zero connection to any listed stock above.\n\nSector-to-ticker mapping for macro events:\n- Oil supply disruption or price spike     → XOM or CVX (pick primary); if equal → MULTI\n- Semiconductor export ban                 → NVDA, AMD, or ASML (pick primary affected)\n- Defense escalation / military conflict   → LMT, RTX, or NOC (pick primary)\n- AI infrastructure demand surge           → NVDA (primary), then AMD or SMCI\n- Big tech regulation / antitrust          → AAPL, MSFT, GOOGL, or META (pick primary)\n- Strait of Hormuz / Iran escalation       → MULTI (energy + defense both affected)\n- Market-wide crash / selloff              → MULTI\n\n────────────────────────────────────────\nSCORING RULES\n────────────────────────────────────────\n5 = Confirmed high-impact event WITH numbers\n    (EPS beat/miss figures, M&A deal price, export ban scope officially stated)\n\n4 = Confirmed event WITHOUT hard numbers\n    (guidance raised/cut, analyst upgrade/downgrade with new target,\n     CEO/CFO fired or resigned confirmed,\n     Iran/Hormuz military action confirmed,\n     Dow/S&P drops 1%+ intraday, oil spikes 3%+)\n\n3 = Event mentioned but impact unclear or indirect\n    (SEC filing without specifics, supply chain disruption reported,\n     executive change rumored, macro event with plausible but unconfirmed impact)\n\n2 = Loosely related to covered stocks, no direct financial event\n\n1 = No trading relevance\n    (opinion, long-term forecast, crypto noise, zero connection to listed stocks)\n\n────────────────────────────────────────\nDIRECTION RULES\n────────────────────────────────────────\n- Earnings beat / guidance raised / analyst upgrade  → Bullish\n- Earnings miss / guidance cut / analyst downgrade   → Bearish\n- CEO fired / major lawsuit / export ban             → Bearish\n- Oil price spike (energy stocks)                    → Bullish for XOM/CVX\n- Oil price spike (macro market)                     → Bearish for broad market\n- Iran/Hormuz escalation                             → Bearish (market-wide)\n- Defense escalation                                 → Bullish for LMT/RTX/NOC\n- Market-wide crash/selloff                          → Bearish\n- Neutral only when impact direction is genuinely ambiguous\n- Neutral is only acceptable when the article contains zero price signal\n- If the event is negative → Bearish. If positive → Bullish. Never default to Neutral.\n\n────────────────────────────────────────\nHARD MACRO RULES\n────────────────────────────────────────\n- Headline includes \"plunge\", \"crash\", \"selloff\", \"dives\", \"tumbles\" → minimum score 4, direction Bearish\n- Iran, Hormuz, or military strike confirmed          → score 4+, ticker MULTI, direction Bearish\n- Dow/S&P drops 1%+ intraday                         → minimum score 4, direction Bearish\n- Oil spikes 3%+ due to geopolitical tension          → minimum score 4, direction Bullish for XOM/CVX, Bearish for broad market\n- Macro event affecting entire US equity market       → ticker MULTI",
+              "role": "system"
+            },
+            {
+              "content": "=Title: {{ $json.title }}\nContent: {{ $json.contentSnippet }}\nSource: {{ $json.source }}\nPublished: {{ $json.pubDate }}\n\nAnalyze this news and detect market shock signals.\nThe \"thesis\" field MUST be written in Korean.\nReturn valid JSON only."
+            }
+          ]
+        },
+        "jsonOutput": true,
+        "options": {
+          "temperature": 0
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.openAi",
+      "typeVersion": 1.5,
+      "position": [
+        1472,
+        -16
+      ],
+      "id": "f2bc90bd-4366-4cdb-a664-e6154c4db8fc",
+      "name": "GPT Shock Detection",
+      "credentials": {
+        "openAiApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Your Credential"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// Parse GPT + Route Decision\n// v1: 기본 파싱 + route 결정\n// v2: 한글 가드 + direction 정규화 (Fix 1)\n// v3: direction_fixed 대소문자 오탐 수정\n//     ticker sanitize / event_id 결정적 키 / thesis 140자 / parse error 로그\n// v4: MULTI 차단 해제 / UNKNOWN만 discard / is_multi·has_valid_ticker 플래그 / Macro 추가\n// v5: ticker 하이픈 → 점 변환 / event_type 정규화 함수 추가\n// v6: [Codex P2-1] normalizeEventType 부분 매칭 강화 (변형 변수 커버)\n//     [Codex P2-2] shock_score/confidence 파싱 강화 (\"4/5\", \"4점\" 형태 처리)\n// v7: [ChatGPT] parseScore 소수 문자열 처리 강화 (\"4.5\"→5, \"0.8\"→1)\n// v8: thesis 접두어 후처리 (\"한국어 한 문장:\", \"요약:\" 등 gpt-4o-mini 오출력 제거)\n// v9: Analyst 이벤트 조건부 추가 (빅테크/반도체 whitelist + score3 + confidence>=3만 Free 허용)\n// ============================================================\n\nconst item = $input.first().json;\n\n// ── 1. GPT 응답 파싱 ───────────────────────────────────────\nlet parsed;\nconst raw = item.message?.content;\n\nif (raw && typeof raw === 'object') {\n  parsed = raw;\n} else {\n  try {\n    const clean = (raw || '').replace(/```json/gi, '').replace(/```/g, '').trim();\n    parsed = JSON.parse(clean);\n  } catch(e) {\n    console.log('[GPT_PARSE_ERROR]', String(raw).substring(0, 200));\n    return [{ json: { action: 'SKIP', shock_score: 0, confidence: 0, _route: 'discard', _parse_error: true } }];\n  }\n}\n\nif (parsed.shock_score === undefined || !parsed.event_type) {\n  return [{ json: { action: 'SKIP', shock_score: 0, confidence: 0, _route: 'discard', _invalid: true } }];\n}\n\n// ── 2. 한글 가드 ───────────────────────────────────────────\n// ✅ v8: thesis 접두어 후처리\n// gpt-4o-mini가 \"한국어 한 문장: ...\", \"요약: ...\" 형태로 뱉는 경우 제거\nconst thesis = String(parsed.thesis || parsed['1line_thesis'] || '')\n  .trim()\n  .replace(/^(한국어\\s*한\\s*문장|한\\s*문장\\s*요약|한줄\\s*요약|요약)\\s*[:：]\\s*/i, '')\n  .trim()\n  .slice(0, 140);\n\nif (!/[가-힣]/.test(thesis)) {\n  console.log(`[KO_GUARD] 영어 thesis 감지 → SKIP: ${thesis.substring(0, 80)}`);\n  return [{ json: {\n    action: 'SKIP',\n    _route: 'discard',\n    _non_korean_thesis: true,\n    shock_score: 0,\n    confidence: 0\n  }}];\n}\n\n// ── 3. Direction 정규화 ────────────────────────────────────\nfunction normalizeDirection(value) {\n  if (value === undefined || value === null) return 'Neutral';\n  const s = String(value).trim().toLowerCase();\n  if (!s || ['none', 'null', 'undefined', 'n/a', 'na', 'unknown'].includes(s)) return 'Neutral';\n  if (['bullish', 'bull', 'positive', 'up', 'long', 'buy', 'upside'].includes(s)) return 'Bullish';\n  if (['bearish', 'bear', 'negative', 'down', 'short', 'sell', 'downside'].includes(s)) return 'Bearish';\n  if (['neutral', 'flat', 'mixed', 'unclear'].includes(s)) return 'Neutral';\n  return 'Neutral';\n}\n\nconst raw_direction = parsed.direction ?? null;\nconst direction = normalizeDirection(raw_direction);\n\nconst direction_fixed = (() => {\n  if (raw_direction === null || raw_direction === undefined) return true;\n  const rawStr = String(raw_direction).trim();\n  if (!rawStr) return true;\n  return rawStr.toLowerCase() !== direction.toLowerCase();\n})();\n\nif (direction_fixed) {\n  console.log(`[DIR_FIX] raw=\"${raw_direction}\" → \"${direction}\"`);\n}\n\n// ── 4. event_type 정규화 ──────────────────────────────────\n// ✅ v6: 부분 매칭(includes) 추가로 변형 변수 커버\n// \"supply chain\", \"supply-chain\", \"macro event\", \"regulatory\" 등 모두 처리\nfunction normalizeEventType(v) {\n  const s = String(v || '').trim().toLowerCase();\n\n  if (s.includes('earning'))                             return 'Earnings';\n  if (s.includes('guidance'))                            return 'Guidance';\n  if (s.includes('regulat'))                             return 'Regulation';  // regulation, regulatory\n  if (s.includes('m&a') || s.includes('merger') || s.includes('acquisition') || s === 'ma') return 'M&A';\n  if (s.includes('supply'))                              return 'SupplyChain'; // supply chain, supply-chain, supplychain\n  if (s.includes('macro'))                               return 'Macro';       // macro, macro event\n  if (s.includes('analyst'))                             return 'Analyst';\n  if (s.includes('product'))                             return 'Product';\n  if (s.includes('other'))                               return 'Other';\n\n  // 미매핑 시 원문 반환 대신 'Other'로 강제 — POST_EVENT_TYPES 미매칭 방지\n  console.log(`[EVENT_TYPE_FALLBACK] raw=\"${v}\" → Other`);\n  return 'Other';\n}\n\n// ── 5. 숫자 파싱 강화 ─────────────────────────────────────\n// ✅ v6: \"4/5\", \"4점\", \"4 out of 5\" 같은 GPT 변형 출력 처리\n// Number(\"4/5\") = NaN → 0 이 되던 문제 수정\nfunction parseScore(value) {\n  if (value === undefined || value === null) return 0;\n\n  // 이미 숫자면 반올림 후 반환\n  if (typeof value === 'number') return Math.min(5, Math.max(0, Math.round(value)));\n\n  const s = String(value).trim();\n\n  // \"4/5\", \"4.5/5\" 형태 — 분자만 추출 후 반올림\n  const slashMatch = s.match(/^(\\d+(?:\\.\\d+)?)\\s*\\/\\s*\\d+(?:\\.\\d+)?$/);\n  if (slashMatch) return Math.min(5, Math.max(0, Math.round(parseFloat(slashMatch[1]))));\n\n  // \"4점\", \"4.5점\", \"score: 4\", \"4 out of 5\" 등 — 첫 번째 수(소수 포함) 추출\n  const floatMatch = s.match(/\\d+(?:\\.\\d+)?/);\n  if (floatMatch) return Math.min(5, Math.max(0, Math.round(parseFloat(floatMatch[0]))));\n\n  return 0;\n}\n\n// ── 6. 필드 추출 ───────────────────────────────────────────\nconst upstream = $('Split Per Article').item.json;\nconst shock_score = parseScore(parsed.shock_score);\nconst confidence  = parseScore(parsed.confidence);\nconst event_type  = normalizeEventType(parsed.event_type);\n\n// ── 7. ticker sanitize ────────────────────────────────────\n// 하이픈 → 점 변환 (BRK-B → BRK.B), 005930.KS 유지\nconst tickerRaw = String(parsed.ticker || 'UNKNOWN').trim().toUpperCase();\nconst ticker = tickerRaw\n  .replace(/^\\$+/, '')          // $ 제거\n  .replace(/-/g, '.')           // 하이픈 → 점\n  .replace(/[^A-Z0-9.]/g, '')  // 영숫자 + 점만 허용\n  .replace(/^\\.+|\\.+$/g, '')   // 앞뒤 점 제거\n  || 'UNKNOWN';\n\n// ── 8. event_id (결정적 키) ────────────────────────────────\nconst event_id = [\n  ticker,\n  event_type,\n  upstream.link || '',\n  upstream.pubDate || ''\n].join('|');\n\n// ── 9. UNKNOWN만 차단, MULTI는 통과 ───────────────────────\nif (ticker === 'UNKNOWN') {\n  console.log(`[UNKNOWN_BLOCK] ticker=UNKNOWN → SKIP`);\n  return [{ json: {\n    action: 'SKIP',\n    _route: 'discard',\n    _unknown_blocked: true,\n    shock_score,\n    confidence\n  }}];\n}\n\nconst is_multi = ticker === 'MULTI';\nconst has_valid_ticker = !is_multi;\n\nif (is_multi) {\n  console.log(`[MULTI_PASS] ticker=MULTI → 통과 (Yahoo 스킵, Tracker 제외)`);\n}\n\n// ── 10. Route 결정 ─────────────────────────────────────────\nconst POST_EVENT_TYPES = ['Earnings', 'Guidance', 'Regulation', 'M&A', 'SupplyChain', 'Macro'];\n\n// ✅ v9: Analyst 조건부 추가\n// 전면 허용 시 노이즈 증가 + Premium 차별점 약화 우려\n// → 빅테크/핵심반도체 whitelist + score3 + confidence>=3 만 Free 허용\nconst FREE_ANALYST_TICKERS = [\n  'NVDA', 'AMD', 'TSM', 'MU', 'AVGO',\n  'AAPL', 'MSFT', 'AMZN', 'GOOGL', 'GOOG', 'META', 'TSLA'\n];\n\nconst allowFreeAnalyst =\n  shock_score === 3 &&\n  confidence >= 3 &&\n  event_type === 'Analyst' &&\n  FREE_ANALYST_TICKERS.includes(ticker);\n\nlet action;\nif (shock_score >= 4) {\n  action = 'POST';\n} else if (shock_score === 3 && (POST_EVENT_TYPES.includes(event_type) || allowFreeAnalyst)) {\n  action = 'POST';\n} else {\n  action = 'SKIP';\n}\n\nlet _route = 'discard';\nlet tier = 'discard';\nif (action === 'POST') {\n  if (shock_score >= 4) {\n    _route = 'premium';\n    tier = 'premium';\n  } else {\n    _route = 'free';\n    tier = 'free';\n  }\n}\n\n// ── 11. 출력 ──────────────────────────────────────────────\nreturn [{\n  json: {\n    source:             upstream.source   || 'Unknown',\n    title:              upstream.title    || '',\n    link:               upstream.link     || '',\n    pubDate:            upstream.pubDate  || '',\n    event_type,\n    ticker,\n    is_multi,\n    has_valid_ticker,\n    shock_score,\n    confidence,\n    direction,\n    raw_direction,\n    direction_fixed,\n    thesis,\n    event_id,\n    action,\n    _route,\n    tier,\n    age_minutes:        upstream.age_minutes ?? null,\n    // ✅ v9: 추적성 필드 추가 (수익화 튜닝용)\n    allow_free_analyst: allowFreeAnalyst,\n    routing_reason:     allowFreeAnalyst  ? 'analyst_whitelist' :\n                        POST_EVENT_TYPES.includes(event_type) && shock_score === 3 ? 'score3_event_type' :\n                        shock_score >= 4  ? 'score4_plus' : 'skip'\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1824,
+        -16
+      ],
+      "id": "6c1054f4-d243-4d79-9e1c-7e996c5d62f1",
+      "name": "Parse GPT + Route Decision"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "route-not-discard",
+              "leftValue": "={{ $json._route }}",
+              "rightValue": "discard",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2048,
+        -16
+      ],
+      "id": "8b403e34-c620-4621-9c01-bee3af5f579f",
+      "name": "Passes Route Filter?"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2272,
+        160
+      ],
+      "id": "6746bafa-77b6-40f2-b5f0-6d8504d3b2f4",
+      "name": "SKIP (Discarded)"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        576,
+        448
+      ],
+      "id": "0130e872-b9b5-4d1b-b416-858852a91667",
+      "name": "No Results - Stop"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1536,
+        176
+      ],
+      "id": "6c67d972-6bf9-4713-8095-8c62dbe9aaa6",
+      "name": "Already Exists - Skip"
+    },
+    {
+      "parameters": {
+        "url": "=https://query1.finance.yahoo.com/v8/finance/chart/{{ $json.ticker }}?range=1d&interval=1m",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        2496,
+        -112
+      ],
+      "id": "ffc113aa-60d8-4215-b571-364f4cda8c5a",
+      "name": "Yahoo Finance - Entry Price",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ✅ $('Passes Route Filter?').first().json → $('Passes Route Filter?').item.json 으로 교체\n// 이유: Run Once for Each Item 모드에서 .first()는 항상 첫 번째 기사만 참조함\n// .item.json = 현재 루프 기사 데이터 (정확)\n\nconst priceData = $input.first().json;\nconst upstream  = $('Passes Route Filter?').item.json;\n\nlet entry_price = null;\nconst entry_time = new Date().toISOString();\n\ntry {\n  const result = priceData?.chart?.result?.[0];\n  if (result) {\n    const closes = result.indicators?.quote?.[0]?.close || [];\n    for (let i = closes.length - 1; i >= 0; i--) {\n      if (closes[i] !== null && closes[i] !== undefined) {\n        entry_price = Math.round(closes[i] * 100) / 100;\n        break;\n      }\n    }\n  }\n} catch(e) {\n  entry_price = null;\n}\n\nconsole.log(`[ENTRY PRICE] ticker=${upstream.ticker} / price=${entry_price}`);\n\nreturn [{\n  json: {\n    ...upstream,\n    entry_price,\n    entry_time\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2720,
+        -112
+      ],
+      "id": "094dd91d-9ad4-404a-bbab-6a9c01325944",
+      "name": "Extract Entry Price",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "not-unknown",
+              "leftValue": "={{ $json.ticker }}",
+              "rightValue": "UNKNOWN",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            },
+            {
+              "id": "not-multi",
+              "leftValue": "={{ $json.ticker }}",
+              "rightValue": "MULTI",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2272,
+        -48
+      ],
+      "id": "cf7dc846-8972-4153-a648-0602980bda32",
+      "name": "Valid Ticker? (not UNKNOWN/MULTI)"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\n// No valid ticker - save without price data\nreturn [{\n  json: {\n    ...item,\n    entry_price: null,\n    entry_time: new Date().toISOString()\n  }\n}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2720,
+        80
+      ],
+      "id": "68ad162c-15a4-4e1b-9cd0-fe01cd75c46f",
+      "name": "Skip Yahoo (No Valid Ticker)"
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 10
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -768,
+        -672
+      ],
+      "id": "788711a3-7787-4e23-ba6e-1aad68622395",
+      "name": "10min Tracker Trigger"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all();\nconst now = new Date();\nconst results = [];\n\nfor (const row of rows) {\n  const entry_time = row.json.entry_time;\n  const ticker = row.json.ticker;\n  const entry_price = row.json.entry_price;\n  const link = row.json.link;\n\n  if (!entry_time || !ticker || !entry_price || !link) continue;\n  if (row.json.exit_price) continue; // 이미 exit_price 있으면 스킵\n  if (ticker === 'UNKNOWN' || ticker === 'MULTI') continue;\n\n  const entryDate = new Date(entry_time);\n  const diffMinutes = (now - entryDate) / 1000 / 60;\n\n  // Only process rows where 60-120 minutes have passed\n  if (diffMinutes < 60) continue;\n\n  results.push({ json: { ...row.json, _ready_for_exit: true } });\n}\n\nif (results.length === 0) return [{ json: { _empty: true } }];\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -320,
+        -672
+      ],
+      "id": "c03e8ad7-0f79-4188-b003-61265e3eeb91",
+      "name": "Filter Rows Ready for Exit (60-120min)"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "empty-check",
+              "leftValue": "={{ $json._empty }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -96,
+        -672
+      ],
+      "id": "baf8af4d-5751-41a4-a5fc-a5e72258ae04",
+      "name": "Has Rows to Track?"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        128,
+        -768
+      ],
+      "id": "7a9e85c5-7379-4467-979e-b5cb491357fe",
+      "name": "Split Per Row"
+    },
+    {
+      "parameters": {
+        "url": "=https://query2.finance.yahoo.com/v8/finance/chart/{{ $json.ticker }}?range=5d&interval=5m",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        352,
+        -768
+      ],
+      "id": "29cb21f0-0c67-494b-8dbb-7e8d70448b39",
+      "name": "Yahoo Finance - Exit Price",
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const priceData = $input.first().json;\nconst upstream = $('Split Per Row').item.json;\n\n// ── 1. Exit Price 추출 ──────────────────────────────────────\nlet exit_price = 0;  // null 대신 0으로 초기화 (is greater than 0 조건 호환)\n\ntry {\n  const result = priceData?.chart?.result?.[0];\n  if (result) {\n    const timestamps = result.timestamp || [];\n    const closes = result.indicators?.quote?.[0]?.close || [];\n    const entryDate = new Date(upstream.entry_time);\n    const targetTs = (entryDate.getTime() / 1000) + 3600;\n\n    let bestIdx = -1;\n    let bestDiff = Infinity;\n\n    for (let i = 0; i < timestamps.length; i++) {\n      if (closes[i] === null || closes[i] === undefined) continue;\n      const diff = Math.abs(timestamps[i] - targetTs);\n      if (diff < bestDiff) {\n        bestDiff = diff;\n        bestIdx = i;\n      }\n    }\n\n    if (bestIdx >= 0) {\n      exit_price = Math.round(closes[bestIdx] * 100) / 100;  // 순수 숫자\n    }\n  }\n} catch(e) {\n  exit_price = 0;\n}\n\n// ── 2. Change% 계산 ─────────────────────────────────────────\nconst entry_price = Number(upstream.entry_price) || 0;\nlet change_pct = 0;\n\nif (exit_price > 0 && entry_price > 0) {\n  change_pct = Math.round(((exit_price - entry_price) / entry_price) * 10000) / 100;\n}\n\n// ── 3. Exit Time ────────────────────────────────────────────\nlet exit_time = '';\ntry {\n  exit_time = new Date(new Date(upstream.entry_time).getTime() + 3600000).toISOString();\n} catch(e) {\n  exit_time = new Date().toISOString();\n}\n\nconsole.log(`[EXIT PRICE] ticker=${upstream.ticker} / entry=${entry_price} / exit=${exit_price} / change=${change_pct}%`);\n\n// ── 4. Return: upstream 필드 + exit 필드 덮어쓰기 ───────────\n// exit_price를 맨 마지막에 명시적으로 선언해서 타입 보장\nconst output = Object.assign({}, upstream);\noutput.exit_price = exit_price;\noutput.exit_time = exit_time;\noutput.change_pct = change_pct;\n\nreturn [{ json: output }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        576,
+        -768
+      ],
+      "id": "2d935b4c-cc1d-41fd-911a-417285bd9deb",
+      "name": "Extract Exit Price + Change%"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "exit-price-exists",
+              "leftValue": "={{ $json.exit_price }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "isNotEmpty"
+              }
+            },
+            {
+              "id": "d9ec9f04-9058-4d2b-a194-c45fa10d066e",
+              "leftValue": "={{ $json.exit_price }}",
+              "rightValue": "\"\"",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            },
+            {
+              "id": "4a412d5e-460f-4ceb-a296-f71ca0d5fc84",
+              "leftValue": "={{ $json.exit_price }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        800,
+        -768
+      ],
+      "id": "93f13182-e483-491f-9f60-8b19e981749e",
+      "name": "Got Exit Price?"
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all();\n\n// Only process rows with change_pct\nconst valid = rows.filter(r => r.json.change_pct !== null && r.json.change_pct !== undefined);\nif (valid.length === 0) return [{ json: { _no_data: true } }];\n\nconst changePcts = valid.map(r => Number(r.json.change_pct));\nconst absChanges = changePcts.map(v => Math.abs(v));\n\nconst avg_abs = Math.round(absChanges.reduce((a,b) => a+b, 0) / absChanges.length * 100) / 100;\nconst max_move = Math.round(Math.max(...absChanges) * 100) / 100;\nconst bullish = changePcts.filter(v => v > 0.5).length;\nconst bearish = changePcts.filter(v => v < -0.5).length;\nconst neutral = valid.length - bullish - bearish;\nconst win_rate = Math.round((bullish / valid.length) * 100);\n\nconst summary = `📊 Shock Performance (last ${valid.length} signals)\\nAvg move: ±${avg_abs}% | Max: ±${max_move}%\\nBullish: ${bullish} | Bearish: ${bearish} | Neutral: ${neutral}\\nBull win rate: ${win_rate}%`;\n\nreturn [{ json: { summary, total: valid.length, avg_abs, max_move, win_rate } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        352,
+        -960
+      ],
+      "id": "8e65d19e-19a1-4882-8e45-02d3f745d4f9",
+      "name": "Calculate Performance Summary"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1024,
+        -560
+      ],
+      "id": "4da89aea-3615-4a29-b41a-a6c7abc415e3",
+      "name": "No Exit Price - Skip"
+    },
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        128,
+        -576
+      ],
+      "id": "07b47888-a322-43ed-b82f-a67393f86694",
+      "name": "No Rows - Stop"
+    },
+    {
+      "parameters": {
+        "numberInputs": 9
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -320,
+        256
+      ],
+      "id": "f66ae386-7b4b-44cd-ac80-ffdffdf5e136",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "url": "https://www.benzinga.com/feed",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -544,
+        -336
+      ],
+      "id": "fce1fa52-551d-49c3-aedc-758b9e5a564e",
+      "name": "https - Benzinga",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://www.cnbc.com/id/19854910/device/rss/rss.html",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -544,
+        -144
+      ],
+      "id": "842501d9-4ace-46f6-8894-f02488f853e7",
+      "name": "https - CNBC Tech",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://feeds.marketwatch.com/marketwatch/topstories",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -544,
+        64
+      ],
+      "id": "f21eedd4-4f9d-4e36-9224-ee69c355b0db",
+      "name": "https - MarketWatch Top",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://rss.nytimes.com/services/xml/rss/nyt/Business.xml",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -544,
+        256
+      ],
+      "id": "17fad35a-aa08-4c21-b3c5-018a1e39fe85",
+      "name": "https - NYT Business",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://feeds.finance.yahoo.com/rss/2.0/headline?s=NVDA,AMD,INTC,TSM,AVGO,ASML,MU,QCOM,ARM,SMCI,MRVL,KLAC,LRCX,AMAT,TSLA&region=US&lang=en-US",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -544,
+        448
+      ],
+      "id": "4c56055c-7ece-422b-a830-281175780774",
+      "name": "https - Yahoo Finance (Tickers)"
+    },
+    {
+      "parameters": {
+        "url": "https://feeds.bloomberg.com/markets/news.rss",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -544,
+        640
+      ],
+      "id": "b76ea279-1d3a-4995-bf1b-262942b46e1e",
+      "name": "https - Bloomberg Markets"
+    },
+    {
+      "parameters": {
+        "url": "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -544,
+        832
+      ],
+      "id": "21e50a19-47d4-4ab3-b248-03b8977c2388",
+      "name": "https-MarketWatch Realtime"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "route-public",
+              "leftValue": "={{ $json._route }}",
+              "rightValue": "premium",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        2944,
+        -48
+      ],
+      "id": "d43dfd9c-bef7-4004-a53b-19548b6fe6af",
+      "name": "Route = premium"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\n\nconst shock_score = item.shock_score || 0;\nconst confidence  = item.confidence  || '?';\nconst ticker      = item.ticker      || 'UNKNOWN';\nconst event_type  = item.event_type  || 'Event';\nconst thesis      = item.thesis      || '';\nconst link        = item.link        || '';\nconst source      = item.source      || '';\nconst pubDate     = item.pubDate;\n\nconst scoreBar = '🟨'.repeat(shock_score) + '⬜'.repeat(5 - shock_score);\n\nlet timeAgo = '';\nif (pubDate) {\n  const diff = Math.floor((Date.now() - new Date(pubDate)) / 60000);\n  timeAgo = diff < 60\n    ? `${diff}min ago`\n    : `${Math.floor(diff / 60)}hr ago`;\n}\n\n// ✅ v2: 법적 리스크 완화\n// - \"SIGNAL\" → \"시장 속보\" (투자 시그널 느낌 제거)\n// - \"Impact\" → \"주목도\" (투자 판단 유도 표현 제거)\n// - \"Conf\" → \"신뢰도\"\n// - 면책 문구 강화\nconst msg = `📡 시장 속보 | ${scoreBar} ${shock_score}/5\n\n📌 ${ticker} · ${event_type}\n🔍 주목도 ${shock_score}/5 · 신뢰도 ${confidence}/5\n\n${thesis}\n\n🔗 ${link}\n📰 ${source}${timeAgo ? ` · ${timeAgo}` : ''}\n\n⚠️ 본 정보는 투자 권유가 아니며, AI 기반 뉴스 큐레이션 서비스입니다. 투자 판단 및 손익에 대한 책임은 본인에게 있습니다.`;\n\nreturn [{ json: { ...item, telegram_text: msg } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3152,
+        144
+      ],
+      "id": "a76f9d8f-4a29-401e-99a7-77b043505f76",
+      "name": "Format Telegram (Score 1~3 Free)",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ $json.telegram_text }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        3456,
+        96
+      ],
+      "id": "a4487060-5fb3-4b8b-98f9-87a113912877",
+      "name": "Telegram (Score 1~3 Free)",
+      "webhookId": "YOUR_WEBHOOK_ID",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Your Credential"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://seekingalpha.com/feed.xml",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        -544,
+        1024
+      ],
+      "id": "576e16aa-6933-4e06-8376-a5052f26ae77",
+      "name": "HTTps seekingalpha"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.first().json;\n\nconst shock_score = item.shock_score || 0;\nconst confidence  = item.confidence  || '?';\nconst ticker      = item.ticker      || 'UNKNOWN';\nconst event_type  = item.event_type  || 'Event';\nconst thesis      = item.thesis      || '';\nconst link        = item.link        || '';\nconst source      = item.source      || '';\nconst pubDate     = item.pubDate;\n\nconst scoreBar = '🟥'.repeat(shock_score) + '⬜'.repeat(5 - shock_score);\n\nlet timeAgo = '';\nif (pubDate) {\n  const diff = Math.floor((Date.now() - new Date(pubDate)) / 60000);\n  timeAgo = diff < 60\n    ? `${diff}min ago`\n    : `${Math.floor(diff / 60)}hr ago`;\n}\n\n// ✅ v2: 법적 리스크 완화\n// - \"SHOCK SIGNAL\" → \"주요 시장 속보\" (투자 시그널 느낌 제거)\n// - \"Impact\" → \"주목도\" (투자 판단 유도 표현 제거)\n// - \"Conf\" → \"신뢰도\"\n// - 면책 문구 강화\nconst msg = `🚨 주요 시장 속보 | ${scoreBar} ${shock_score}/5\n\n📌 ${ticker} · ${event_type}\n🔍 주목도 ${shock_score}/5 · 신뢰도 ${confidence}/5\n\n${thesis}\n\n🔗 ${link}\n📰 ${source}${timeAgo ? ` · ${timeAgo}` : ''}\n\n⚠️ 본 정보는 투자 권유가 아니며, AI 기반 뉴스 큐레이션 서비스입니다. 투자 판단 및 손익에 대한 책임은 본인에게 있습니다.`;\n\nreturn [{ json: { ...item, telegram_text: msg } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        3200,
+        -112
+      ],
+      "id": "eb8307d9-9c26-4032-8b53-814245004408",
+      "name": "Format Telegram (Premium ≥4)",
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "={{ $json.telegram_text }}",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [
+        3440,
+        -240
+      ],
+      "id": "0b798f25-46ff-487f-a960-53fd519b86d4",
+      "name": "Telegram Premium (Score ≥4)",
+      "webhookId": "YOUR_WEBHOOK_ID",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Your Credential"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyX",
+              "value": 10,
+              "unit": "minutes"
+            }
+          ]
+        },
+        "feedUrl": "https://www.financialjuice.com/feed.ashx?xy=rss"
+      },
+      "type": "n8n-nodes-base.rssFeedReadTrigger",
+      "typeVersion": 1,
+      "position": [
+        -784,
+        1248
+      ],
+      "id": "b1aff138-22c4-48ae-825a-ac2ae708aadd",
+      "name": "RSS Feed - fianciaulJuice"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ============================================================\n// FinancialJuice Normalize v4\n// v1: stripHtml, split('?')[0], age_minutes 계산\n// v2: domain 안전, pubDate fallback 확장, source_type 추가\n// v3: normalizeLink() 추가, age_minutes 범위 필터\n// v4: pubDate 없는 항목 제거 (Parse RSS 완전 일치)\n// ============================================================\nconst now = Date.now();\n\nconst stripHtml = (s = '') =>\n  s.replace(/<[^>]*>/g, ' ').replace(/\\s+/g, ' ').trim();\n\nconst normalizeLink = (url = '') =>\n  url.trim().replace(/#.*$/, '').split('?')[0].replace(/\\/+$/, '');\n\nreturn $input.all()\n  .map(({ json }) => {\n    const rawLink = (json.link || '').trim();\n    const link = normalizeLink(rawLink);\n\n    let domain = '';\n    try {\n      domain = rawLink ? new URL(rawLink).hostname : '';\n    } catch {}\n\n    const pubDate =\n      json.isoDate   ||\n      json.pubDate   ||\n      json.published ||\n      json.created   ||\n      json.date      ||\n      '';\n\n    const pub = new Date(pubDate);\n    const age_minutes = isNaN(pub.getTime())\n      ? null\n      : Math.round((now - pub.getTime()) / 60000);\n\n    return {\n      json: {\n        source:         'FinancialJuice',\n        source_type:    'macro',\n        title:          (json.title || '').trim(),\n        link,\n        domain,\n        contentSnippet: stripHtml(\n          json.contentSnippet || json.content || json.summary || ''\n        ),\n        pubDate,\n        age_minutes,\n      },\n    };\n  })\n  // v4: Parse RSS 완전 동일 기준 (pubDate 없는 항목 제거)\n  .filter(item =>\n    item.json.title        &&\n    item.json.link         &&\n    item.json.pubDate      &&\n    item.json.age_minutes !== null &&\n    item.json.age_minutes <= 1440  &&\n    item.json.age_minutes >= -60\n  );"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -512,
+        1248
+      ],
+      "id": "8b22b83d-2f6d-43f8-b4e0-9ba20c62326b",
+      "name": "FinancialJuice Normalize"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "signals",
+        "limit": 1,
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "link",
+              "condition": "eq",
+              "keyValue": "={{$json.link}}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        784,
+        80
+      ],
+      "id": "cc62f7f1-2c0f-4423-9f75-cb2f04bd5327",
+      "name": "Duplicate Check (DB)",
+      "alwaysOutputData": true,
+      "credentials": {
+        "supabaseApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Your Credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "tableId": "signals",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "link",
+              "fieldValue": "={{$json.link}}"
+            },
+            {
+              "fieldId": "title",
+              "fieldValue": "={{$json.title}}"
+            },
+            {
+              "fieldId": "event_type",
+              "fieldValue": "={{$json.event_type}}"
+            },
+            {
+              "fieldId": "ticker",
+              "fieldValue": "={{$json.ticker}}"
+            },
+            {
+              "fieldId": "shock_score",
+              "fieldValue": "={{$json.shock_score}}"
+            },
+            {
+              "fieldId": "direction",
+              "fieldValue": "={{$json.direction}}"
+            },
+            {
+              "fieldId": "confidence",
+              "fieldValue": "={{$json.confidence}}"
+            },
+            {
+              "fieldId": "thesis",
+              "fieldValue": "={{$json.thesis}}"
+            },
+            {
+              "fieldId": "source",
+              "fieldValue": "={{$json.source}}"
+            },
+            {
+              "fieldId": "entry_price",
+              "fieldValue": "={{$json.entry_price}}"
+            },
+            {
+              "fieldId": "entry_time",
+              "fieldValue": "={{$json.entry_time}}"
+            },
+            {
+              "fieldId": "run_id",
+              "fieldValue": "={{$execution.id}}"
+            },
+            {
+              "fieldId": "tier",
+              "fieldValue": "={{ $json.tier }}"
+            },
+            {
+              "fieldId": "pub_date",
+              "fieldValue": "={{ $json.pubDate }}"
+            },
+            {
+              "fieldId": "age_minutes",
+              "fieldValue": "={{ $json.age_minutes }}"
+            },
+            {
+              "fieldId": "allow_free_analyst",
+              "fieldValue": "={{ $json.allow_free_analyst }}"
+            },
+            {
+              "fieldId": "routing_reason",
+              "fieldValue": "={{ $json.routing_reason }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        3456,
+        -80
+      ],
+      "id": "28dcc496-2eca-4b4e-a082-b54e7f2efa18",
+      "name": "Save to DB (Premium)",
+      "credentials": {
+        "supabaseApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Your Credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "tableId": "signals",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "link",
+              "fieldValue": "={{$json.link}}"
+            },
+            {
+              "fieldId": "title",
+              "fieldValue": "={{$json.title}}"
+            },
+            {
+              "fieldId": "event_type",
+              "fieldValue": "={{$json.event_type}}"
+            },
+            {
+              "fieldId": "ticker",
+              "fieldValue": "={{$json.ticker}}"
+            },
+            {
+              "fieldId": "shock_score",
+              "fieldValue": "={{$json.shock_score}}"
+            },
+            {
+              "fieldId": "direction",
+              "fieldValue": "={{$json.direction}}"
+            },
+            {
+              "fieldId": "confidence",
+              "fieldValue": "={{$json.confidence}}"
+            },
+            {
+              "fieldId": "thesis",
+              "fieldValue": "={{$json.thesis}}"
+            },
+            {
+              "fieldId": "source",
+              "fieldValue": "={{$json.source}}"
+            },
+            {
+              "fieldId": "tier",
+              "fieldValue": "={{$json.tier}}"
+            },
+            {
+              "fieldId": "entry_price",
+              "fieldValue": "={{$json.entry_price}}"
+            },
+            {
+              "fieldId": "entry_time",
+              "fieldValue": "={{$json.entry_time}}"
+            },
+            {
+              "fieldId": "run_id",
+              "fieldValue": "={{$execution.id}}"
+            },
+            {
+              "fieldId": "pub_date",
+              "fieldValue": "={{ $json.pubDate }}"
+            },
+            {
+              "fieldId": "age_minutes",
+              "fieldValue": "={{ $json.age_minutes }}"
+            },
+            {
+              "fieldId": "allow_free_analyst",
+              "fieldValue": "={{ $json.allow_free_analyst }}"
+            },
+            {
+              "fieldId": "routing_reason",
+              "fieldValue": "={{ $json.routing_reason }}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        3440,
+        272
+      ],
+      "id": "9816051c-7509-4bad-95f9-5ac6dd61dbe9",
+      "name": "Save to DB (1~3 Free)",
+      "credentials": {
+        "supabaseApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Your Credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "signals",
+        "returnAll": true,
+        "filterType": "string",
+        "filterString": "exit_price=is.null,ticker=not.in.(UNKNOWN,MULTI)"
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        -544,
+        -672
+      ],
+      "id": "80c7f0fa-632f-445d-a4ed-f0a9364c25fc",
+      "name": "Fetch Rows Without Exit Price1",
+      "credentials": {
+        "supabaseApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Your Credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "signals",
+        "filterType": "string",
+        "filterString": "=link=eq.{{$json.link}}",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "exit_price",
+              "fieldValue": "={{$json.exit_price}}"
+            },
+            {
+              "fieldId": "exit_time",
+              "fieldValue": "={{$json.exit_time}}"
+            },
+            {
+              "fieldId": "change_pct",
+              "fieldValue": "={{$json.change_pct}}"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        1008,
+        -784
+      ],
+      "id": "5e593cfd-2d5f-4f2d-9abe-d3441566bcdd",
+      "name": "Update DB - Exit Price + Change%1",
+      "credentials": {
+        "supabaseApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Your Credential"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "tableId": "performance_summary"
+      },
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [
+        544,
+        -960
+      ],
+      "id": "67923a70-9140-4ab3-80b4-f0f2796dec8b",
+      "name": "Save Performance Summary1",
+      "credentials": {
+        "supabaseApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Your Credential"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Parse RSS": {
+      "main": [
+        [
+          {
+            "node": "Keyword Filter (Company AND Event)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Results?": {
+      "main": [
+        [
+          {
+            "node": "Split Per Article",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Results - Stop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Per Article": {
+      "main": [
+        [],
+        [
+          {
+            "node": "Duplicate Check (DB)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Duplicate Check Logic": {
+      "main": [
+        [
+          {
+            "node": "New Article?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "New Article?": {
+      "main": [
+        [
+          {
+            "node": "GPT Shock Detection",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Already Exists - Skip",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "GPT Shock Detection": {
+      "main": [
+        [
+          {
+            "node": "Parse GPT + Route Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse GPT + Route Decision": {
+      "main": [
+        [
+          {
+            "node": "Passes Route Filter?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Passes Route Filter?": {
+      "main": [
+        [
+          {
+            "node": "Valid Ticker? (not UNKNOWN/MULTI)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "SKIP (Discarded)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Keyword Filter (Company AND Event)": {
+      "main": [
+        [
+          {
+            "node": "Has Results?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "10min Schedule Trigger": {
+      "main": [
+        [
+          {
+            "node": "https - Benzinga",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "https - CNBC Tech",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "https - MarketWatch Top",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "https - NYT Business",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "https - Yahoo Finance (Tickers)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "https - Bloomberg Markets",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "https-MarketWatch Realtime",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "HTTps seekingalpha",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Yahoo Finance - Entry Price": {
+      "main": [
+        [
+          {
+            "node": "Extract Entry Price",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Entry Price": {
+      "main": [
+        [
+          {
+            "node": "Route = premium",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid Ticker? (not UNKNOWN/MULTI)": {
+      "main": [
+        [
+          {
+            "node": "Yahoo Finance - Entry Price",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Skip Yahoo (No Valid Ticker)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Skip Yahoo (No Valid Ticker)": {
+      "main": [
+        [
+          {
+            "node": "Route = premium",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "10min Tracker Trigger": {
+      "main": [
+        [
+          {
+            "node": "Fetch Rows Without Exit Price1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter Rows Ready for Exit (60-120min)": {
+      "main": [
+        [
+          {
+            "node": "Has Rows to Track?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Has Rows to Track?": {
+      "main": [
+        [
+          {
+            "node": "Split Per Row",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Rows - Stop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Per Row": {
+      "main": [
+        [
+          {
+            "node": "Calculate Performance Summary",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Yahoo Finance - Exit Price",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Yahoo Finance - Exit Price": {
+      "main": [
+        [
+          {
+            "node": "Extract Exit Price + Change%",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Exit Price + Change%": {
+      "main": [
+        [
+          {
+            "node": "Got Exit Price?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Got Exit Price?": {
+      "main": [
+        [
+          {
+            "node": "Update DB - Exit Price + Change%1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Exit Price - Skip",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Performance Summary": {
+      "main": [
+        [
+          {
+            "node": "Save Performance Summary1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "No Exit Price - Skip": {
+      "main": [
+        []
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "Parse RSS",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "https - Benzinga": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "https - CNBC Tech": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "https - MarketWatch Top": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 2
+          }
+        ]
+      ]
+    },
+    "https - NYT Business": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 3
+          }
+        ]
+      ]
+    },
+    "https - Yahoo Finance (Tickers)": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 4
+          }
+        ]
+      ]
+    },
+    "https - Bloomberg Markets": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 5
+          }
+        ]
+      ]
+    },
+    "https-MarketWatch Realtime": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 6
+          }
+        ]
+      ]
+    },
+    "Route = premium": {
+      "main": [
+        [
+          {
+            "node": "Format Telegram (Premium ≥4)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Format Telegram (Score 1~3 Free)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Telegram (Score 1~3 Free)": {
+      "main": [
+        [
+          {
+            "node": "Save to DB (1~3 Free)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Telegram (Score 1~3 Free)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Split Per Article",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram (Score 1~3 Free)": {
+      "main": [
+        []
+      ]
+    },
+    "HTTps seekingalpha": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 7
+          }
+        ]
+      ]
+    },
+    "Format Telegram (Premium ≥4)": {
+      "main": [
+        [
+          {
+            "node": "Telegram Premium (Score ≥4)",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Split Per Article",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Save to DB (Premium)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Telegram Premium (Score ≥4)": {
+      "main": [
+        []
+      ]
+    },
+    "RSS Feed - fianciaulJuice": {
+      "main": [
+        [
+          {
+            "node": "FinancialJuice Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "FinancialJuice Normalize": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 8
+          }
+        ]
+      ]
+    },
+    "Duplicate Check (DB)": {
+      "main": [
+        [
+          {
+            "node": "Duplicate Check Logic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save to DB (Premium)": {
+      "main": [
+        []
+      ]
+    },
+    "Save to DB (1~3 Free)": {
+      "main": [
+        []
+      ]
+    },
+    "Fetch Rows Without Exit Price1": {
+      "main": [
+        [
+          {
+            "node": "Filter Rows Ready for Exit (60-120min)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update DB - Exit Price + Change%1": {
+      "main": [
+        [
+          {
+            "node": "Split Per Row",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "REDACTED",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "YOUR_INSTANCE_ID"
+  },
+  "id": "REDACTED",
+  "tags": []
+}
