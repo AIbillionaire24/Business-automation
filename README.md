@@ -26,11 +26,9 @@
 
 > 교육 서비스 기업 PC 원격지원 실무 (재택) | **운영 중**
 
-- 작업 스케줄러로 출근 시 업무 앱 자동 실행 / 퇴근 시 자동 종료 (시간 가드·연장근무 모드 포함)
-- 사내 메신저 출근·퇴근 인사 자동 발송 — UI Automation 기반, 공휴일 목록·당일 중복 발송 방지·재시도·자체 QA 스크립트
-- AutoHotkey v2 `/re` → 인증번호 입력 → 원격지원 안내문 + 이미지 자동 삽입
-- 18:55 연장근무 확인 알림 → 연장한 날은 퇴근 메시지·앱 종료를 건너뛰고 수동 퇴근 처리
-- **기술**: PowerShell 5.1, UI Automation, AutoHotkey v2, Windows Task Scheduler
+- 작업 스케줄러로 업무 앱 자동 실행 / 종료 (중복 실행 방지, 시간 가드로 근무 중 오작동 차단)
+- AutoHotkey v2 `/re` → 인증번호 입력 → 원격지원 안내문 + 이미지 자동 삽입 (지정한 메신저 창이 활성일 때만 동작)
+- **기술**: PowerShell 5.1, AutoHotkey v2, Windows Task Scheduler
 
 📂 [상세 문서 →](./pc-support-automation/README.md)
 
@@ -53,8 +51,7 @@
 ### 🟡 [예약 작업 자동화](./scheduled-tasks/) — 작업 스케줄러 + CDP + Tampermonkey
 
 - 업무 포털 로그인 자동 입력 — 자격증명은 DPAPI(`Export-Clixml`)로 저장, 허용 도메인 탭에만 입력
-- Tampermonkey: 게시판 새 원격요청 알림(소리), 로그인 세션 유지
-- 개인용: 라이브 방송 자동 열기/닫기 (Chrome DevTools Protocol)
+- Tampermonkey: 게시판 새 원격요청 알림(소리)
 
 📂 [폴더 →](./scheduled-tasks/)
 
@@ -92,11 +89,11 @@
 
 **AI/API**: OpenAI GPT-4o-mini, Telegram Bot API, Yahoo Finance API, Google Sheets API
 
-**모니터링**: Grafana, Splunk, Distill Web Monitor
+**모니터링**: Grafana, Distill Web Monitor
 
 ---
 
 ## 연락처
 
-- 📧 beomsol2@gmail.com
-- 💼 [GitHub](https://github.com/lifeispain1124)
+- 📧 bumsol2@gmail.com
+- 💼 [GitHub](https://github.com/AIbillionaire24)
