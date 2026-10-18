@@ -1,0 +1,24 @@
+# 환경 고유값 / 비밀
+deploy-blocklist.txt
+*credential*.xml
+*.flag
+*.sent
+*.hold
+
+# 로그·빌드 산출물
+logs/
+*.log
+RST_*.txt
+dist/
+*.bat.build
+
+# 백업
+*.bak
+*.bak_*
+_backup_*
+_tmp/
+
+# OS
+Thumbs.db
+desktop.ini
+.DS_Store

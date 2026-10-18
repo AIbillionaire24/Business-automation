@@ -1,0 +1,10 @@
+# 배포본(.bat)에 절대 들어가면 안 되는 단어 목록 (예시)
+# 실제 파일 이름: deploy-blocklist.txt  (.gitignore 대상)
+# Build-SingleFile.ps1 이 빌드 후 배포본 전체를 훑어 하나라도 남으면 빌드를 실패시킨다.
+# 사람 실명
+홍길동
+# 계정 ID / 컴퓨터명
+teacher0000
+DESKTOP-XXXXXXX
+# 담당자 개인 경로
+USERNAME

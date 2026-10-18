@@ -24,15 +24,39 @@
 
 ### 🟢 [PC 원격지원 업무 자동화](./pc-support-automation/) — PowerShell + AutoHotkey v2
 
-> 천재교과서 PC 원격지원 실무 | **운영 중**
+> 교육 서비스 기업 PC 원격지원 실무 (재택) | **운영 중**
 
-- PowerShell + 작업 스케줄러로 출퇴근 시 업무용 앱 7개 자동 실행/종료
-- AutoHotkey v2로 원격지원 안내 메시지 자동 생성 (`/remo` → 인증번호 입력 → 이미지 첨부 → 전송)
-- 브라우저 캐시 삭제 자동화 (Chrome/Edge 대응)
-- **월간 약 8~10시간 절감**
-- **기술**: PowerShell, AutoHotkey v2, Windows Task Scheduler
+- 작업 스케줄러로 출근 시 업무 앱 자동 실행 / 퇴근 시 자동 종료 (시간 가드·연장근무 모드 포함)
+- 사내 메신저 출근·퇴근 인사 자동 발송 — UI Automation 기반, 공휴일 목록·당일 중복 발송 방지·재시도·자체 QA 스크립트
+- AutoHotkey v2 `/re` → 인증번호 입력 → 원격지원 안내문 + 이미지 자동 삽입
+- 18:55 연장근무 확인 알림 → 연장한 날은 퇴근 메시지·앱 종료를 건너뛰고 수동 퇴근 처리
+- **기술**: PowerShell 5.1, UI Automation, AutoHotkey v2, Windows Task Scheduler
 
 📂 [상세 문서 →](./pc-support-automation/README.md)
+
+---
+
+### 🔵 [원격지원 진단 툴킷](./remote-support-toolkit/) — 단일 파일 PowerShell 툴킷
+
+> 원격 세션에서 교사 PC로 보내 실행하는 1차 진단·정리 도구 | v3.6.20 | 약 5,200행 | **운영 중**
+
+- 증상별 시나리오 6종(카메라/마이크, 로그인, CRM, 강의 재생, 느림, 화상수업 품질) + 개별 도구 18종
+- 보안 프로그램 탐지 → 보존 목록 우선 평가 → UI로 안 지워지는 것만 CMD 제거
+- 이름 기반 탐지가 못 잡는 경우를 위해 **프로세스별 TCP 연결 수**로 느림 원인 추적
+- 실제 케이스가 들어올 때마다 버전을 올리고, 변경 근거(실측)를 스크립트 헤더에 기록
+- 빌드 스크립트가 단일 `.bat` 배포본을 만들고, **금지어 목록(실명·계정ID)이 남아 있으면 빌드 실패**
+
+📂 [상세 문서 →](./remote-support-toolkit/README.md)
+
+---
+
+### 🟡 [예약 작업 자동화](./scheduled-tasks/) — 작업 스케줄러 + CDP + Tampermonkey
+
+- 업무 포털 로그인 자동 입력 — 자격증명은 DPAPI(`Export-Clixml`)로 저장, 허용 도메인 탭에만 입력
+- Tampermonkey: 게시판 새 원격요청 알림(소리), 로그인 세션 유지
+- 개인용: 라이브 방송 자동 열기/닫기 (Chrome DevTools Protocol)
+
+📂 [폴더 →](./scheduled-tasks/)
 
 ---
 
